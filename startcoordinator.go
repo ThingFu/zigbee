@@ -3,15 +3,21 @@ package main
 import (
 	serial "github.com/tarm/goserial"
 	"log"
-	"fmt"
 	"io"
-	"net/http"
 	"github.com/go-home/zigbee/handler"
 	"os"
 	"os/signal"
+	"fmt"
+)
+
+const (
+	MAX_FRAME_SIZE	= 	256
 )
 
 func ParseResponse(buf []byte) {
+	// fmt.Println("Incoming Buffer: ")
+	// fmt.Println(buf)
+
 	sof := buf[0]
 	if sof != handler.SOF {
 		log.Println("Invalid Start of Frame Indicator")
@@ -26,6 +32,7 @@ func ParseResponse(buf []byte) {
 	fcs := buf[frameEnd]
 
 	if !handler.VerifyFCS(buf[1:frameEnd], fcs) {
+		fmt.Println("Failed VerifyFCS")
 		return
 	}
 
@@ -39,7 +46,7 @@ func ParseResponse(buf []byte) {
 
 func StartReadFromSerial(s io.ReadWriteCloser) {
 	for {
-		serialContent := make([]byte, 256)
+		serialContent := make([]byte, MAX_FRAME_SIZE)
 		_, err := s.Read(serialContent)
 		if err != nil {
 			log.Fatal(err)
@@ -50,7 +57,7 @@ func StartReadFromSerial(s io.ReadWriteCloser) {
 var responseHandler *handler.ResponseHandler
 
 func main() {
-	c := &serial.Config{ Name: "/dev/tty.usbmodem14141", Baud: 115200 }
+	c := &serial.Config{ Name: "/dev/tty.usbmodem14121", Baud: 115200 }
 	s, err := serial.OpenPort(c)
 	if err != nil {
 		log.Fatal(err)
@@ -59,9 +66,17 @@ func main() {
 	responseHandler = handler.NewResponseHandler(s)
 	go StartReadFromSerial(s)
 
-	sigchan := make(chan os.Signal, 10)
-	signal.Notify(sigchan, os.Interrupt)
-	<-sigchan
+	// SYS_RESET_REQ
+
+	responseHandler.StartComm()
+
+	sig_chan := make(chan os.Signal, 10)
+	signal.Notify(sig_chan, os.Interrupt)
+	<- sig_chan
 	log.Println("Coordinator Stopped")
 	os.Exit(0)
 }
+
+/*
+	2014/09/22 02:15:31 Unknown Command [Cmd0: 0x45, Cmd1: 0xca]
+ */

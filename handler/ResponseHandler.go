@@ -5,6 +5,7 @@ import (
 	"log"
 	"fmt"
 	"strings"
+	"github.com/go-home/hub/utils"
 )
 
 /*
@@ -46,6 +47,8 @@ const (
 
 	ZDO_STARTUP_FROM_APP = 0x40
 	ZDO_MSG_CB_REGISTER = 0xFF
+	ZDO_MATCH_DESC_REQ = 0x06
+	ZDO_ACTIVE_EP_REQ = 0x05
 
 	UTIL_ASSOC_COUNT = 0x48
 	UTIL_ASSOC_FIND_DEVICE = 0x49
@@ -69,12 +72,27 @@ type IncomingFrame struct {
 	Data	[]byte
 }
 
+type Callback struct {
+	Fn		func(data []byte, params interface {})
+	Param	interface {}
+}
+
+func NewCallback(fn func(data []byte, params interface {}), param interface {}) Callback {
+	cb := new (Callback)
+	cb.Fn = fn
+	cb.Param = param
+
+	return *cb
+}
+
 type ResponseHandler struct {
 	serial		io.ReadWriteCloser
+	callbacks	map[string]Callback
 }
 
 func NewResponseHandler(s io.ReadWriteCloser) *ResponseHandler{
 	h := new (ResponseHandler)
+	h.callbacks = make(map[string]Callback)
 	h.serial = s
 
 	return h
@@ -84,50 +102,94 @@ func (r *ResponseHandler) HandleResponse(f IncomingFrame) {
 	cmd0 := f.Cmd0
 	cmd1 := f.Cmd1
 	data := f.Data
-
+	key := ""
 	switch {
-	case cmd0 == 0x41 && cmd1 == 0x80:	// SYS_RESET_IND
-		reason := f.Data[0]
-		r.handlePowerUp(reason, data)
+	case cmd0 == 0x45:
+		switch {
+		case cmd1 == 0xC9:	// ZDO_LEAVE_IND
 
-	case cmd0 == 0x66 && cmd1 == 0x00:	// ZB_START_REQUEST
-		r.handleStartupRequest()
+		case cmd1 == 0xC1:	// ZDO_END_DEVICE_ANNCE_IND
 
-	case cmd0 == 0x67 && cmd1 == 0x48:	// UTIL_ASSOC_COUNT
-		count := int(data[0]) | int (data[1]) << 8
-		for i:=0; i < count; i++ {
-			r.SendRequest(CMDTYPE_SREQ_UTIL, UTIL_ASSOC_FIND_DEVICE, []byte{ byte(i-1) })
+		case cmd1 == 0xC0:	// ZDO_STATE_CHANGE_IND
+			state := data[0]
+			r.handleStateChange(state)
 		}
 
-	case cmd0 == 0x67 && cmd1 == 0x41:
-		addr := ""
-		for i := len(data) - 1; i >= 0; i-- {
-			addr += fmt.Sprintf("%x", data[i])
+	case cmd0 == 0x41:
+		switch {
+		case cmd1 == 0x80: // SYS_RESET_IND
+			reason := f.Data[0]
+			r.handlePowerUp(reason, data)
+
 		}
-		log.Println("Discovered New Device: IEEE " + strings.ToUpper(addr))
 
-	case cmd0 == 0x67 && cmd1 == 0x49:	// UTIL_ASSOC_FIND_DEVICE
-		r.SendRequest(CMDTYPE_SREQ_UTIL, UTIL_ADDRMGR_NWK_ADDR_LOOKUP, []byte{ data[0], data[1] })
+	case cmd0 == 0x64:
+		switch {
+			case cmd1 == 0x00:
+		}
 
-	case cmd0 == 0x45 && cmd1 == 0xC9:	// ZDO_LEAVE_IND
+	case cmd0 == 0x65:
+		switch {
+		case cmd1 == 0x05:
+			key = "ZDO_ACTIVE_EP_REQ"
+		}
 
-	case cmd0 == 0x45 && cmd1 == 0xC1:	// ZDO_END_DEVICE_ANNCE_IND
+	case cmd0 == 0x66:
+		switch {
+		case cmd1 == 0x00: // ZB_START_REQUEST
+			r.handleStartupRequest()
 
-	case cmd0 == 0x45 && cmd1 == 0xC0:	// ZDO_STATE_CHANGE_IND
-		state := data[0]
-		r.handleStateChange(state)
+		case cmd1 == 0x08:
+			r.handlePermitJoiningRequest()
 
-	case cmd0 == 0x66 && cmd1 == 0x08:
-		r.handlePermitJoiningRequest()
+		case cmd1 == 0x05:
+			status := data[0]
+			r.handleWriteConfiguration(status)
+		}
 
-	case cmd0 == 0x64 && cmd1 == 0x00:
+	case cmd0 == 0x67:
+		switch {
+		case cmd1 == 0x41: // UTIL_ADDRMGR_NWK_ADDR_LOOKUP
+			key = "UTIL_ADDRMGR_NWK_ADDR_LOOKUP"
+			addr := ""
+			for i := len(data) - 1; i >= 0; i-- {
+				addr += fmt.Sprintf("%x", data[i])
+			}
+			log.Println("Discovered New Device: IEEE " + strings.ToUpper(addr))
 
-	case cmd0 == 0x66 && cmd1 == 0x05:
-		status := data[0]
-		r.handleWriteConfiguration(status)
+		case cmd1 == 0x48: // UTIL_ASSOC_COUNT
+			count := int(data[0]) | int (data[1]) << 8
+			for i:=0; i < count; i++ {
+				r.SendRequest(CMDTYPE_SREQ_UTIL, UTIL_ASSOC_FIND_DEVICE, []byte{ byte(i-1) })
+			}
+
+		case cmd1 == 0x49: // UTIL_ASSOC_FIND_DEVICE
+			addr := []byte{ data[0], data[1] }
+
+			cb1 := NewCallback(func(d []byte, param interface {}) {
+
+				payload := []byte{ data[0], data[1], data[0], data[1], 0x04, 0x01, 0x00, 0x00 }
+
+				cb2 := NewCallback(func(d []byte, param interface {}) {
+					fmt.Println("ZDO_ACTIVE_EP_REQ")
+					fmt.Println(d)
+				}, []byte {data[0], data[1], data[0], data[1]})
+				r.SendRequestWithCallback(CMDTYPE_SREQ_ZDO, ZDO_ACTIVE_EP_REQ, payload, "ZDO_ACTIVE_EP_REQ", &cb2)
+			}, addr)
+
+			r.SendRequestWithCallback(CMDTYPE_SREQ_UTIL, UTIL_ADDRMGR_NWK_ADDR_LOOKUP, addr, "UTIL_ADDRMGR_NWK_ADDR_LOOKUP", &cb1)
+		}
 
 	default:
 		log.Println(fmt.Sprintf("Unknown Command [Cmd0: 0x%x, Cmd1: 0x%x]", cmd0, cmd1))
+		fmt.Println(data)
+	}
+
+	for k, v := range r.callbacks {
+		if strings.HasPrefix(k, key) {
+			v.Fn(data, v.Param)
+			delete (r.callbacks, k)
+		}
 	}
 }
 
@@ -221,6 +283,18 @@ func (r *ResponseHandler) handlePowerUp (reason byte, data []byte) {
 }
 
 func (r *ResponseHandler) SendRequest(cmd0 byte, cmd1 byte, data []byte) {
+	length := byte(len(data))
+
+	frame := []byte { SOF, length, cmd0, cmd1 }
+	frame = append(frame, data...)
+	frame = append(frame, CalculateFCS(frame[1:]))
+
+	r.serial.Write(frame)
+}
+
+func (r *ResponseHandler) SendRequestWithCallback(cmd0 byte, cmd1 byte, data []byte, key string, cb *Callback) {
+	id := utils.RandomString(7)
+	r.callbacks[key + "-" + id] = *cb
 	length := byte(len(data))
 
 	frame := []byte { SOF, length, cmd0, cmd1 }
